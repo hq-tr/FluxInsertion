@@ -1,4 +1,4 @@
-# Insert flux to a polynomial.
+# Insert flux to a polynomial state
 
 Written by Trung
 
