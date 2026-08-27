@@ -4,9 +4,11 @@ include("/home/trung/_qhe-julia/Misc.jl")
 using .MiscRoutine
 
 using Combinatorics
+using LinearAlgebra
 
 using ArgMacros
 
+const tol = 1e-14
 function raised(partition::BitVector, index_set::Vector{Int}, No::Int)
     compare = BitVector(dex2bin(index_set, No)) .⊻ BitVector(dex2bin(index_set.+1, No))
     return partition .⊻ compare
@@ -19,7 +21,7 @@ function all_valid_raise(partition::BitVector, k::Int, Ne::Int, No::Int)
     return all_results[count.(all_results).==Ne]
 end
 
-function FQH_quasihole_poly_gen!(start_state::FQH_state_mutable, pos::Vector{T} where T <: Number)
+function FQH_quasihole_poly_gen!(start_state::FQH_state_mutable, pos::Vector{T} where T <: Number;quiet=false)
     q = length(pos)
     @assert q≥0
     if length(pos)==0
@@ -27,7 +29,9 @@ function FQH_quasihole_poly_gen!(start_state::FQH_state_mutable, pos::Vector{T} 
     else
         FQH_quasihole_poly_gen!(start_state,pos[1:end-1])
         w = pos[end]
-        println("Inserting flux at $w")
+        if !quiet
+            println("Inserting flux at $w")
+        end
 
         @time begin
         if w==0
@@ -53,7 +57,7 @@ function FQH_quasihole_poly_gen!(start_state::FQH_state_mutable, pos::Vector{T} 
             deleteat!(start_state.coef,1:dim)
 
         end
-        end
+        end # end of @time
         return
     end
 end
@@ -63,6 +67,9 @@ function main()
     @inlinearguments begin
         @argumentrequired String fname "-f" "--filename"
         @argumentrequired String geom "-g" "--geometry"
+        @argumentrequired Int nflux "-n" "--num-flux"
+        @argumentflag overwrite "--overwrite"
+        @argumentflag saveraw "--save-raw"
     end
 
     if !isfile(fname)
@@ -73,58 +80,84 @@ function main()
     geom = lowercase(geom)
     @assert(geom in ["sphere","disk"], "'geometry' argument must be either 'sphere' or 'disk'.")
 
-    
-
-    print("Working on the disk(1) or sphere(2)? ")
-    choice = parse(Int, readline())
-    @assert choice==1 || choice==2
-
-    println("File name of the jack polynomial ground state:")
-    fname = readline()
-    state = readwf(fname; mutable=true)
-    #println("ground state = ")
-    #display(state)
-
-    if length(state.basis) > 0
-        println("How many fluxes to add? ")
-        nflux = parse(Int, readline())
-        loc = ComplexF64[]
-        if choice == 1
-            println("Input positions X Y for the inserted flux")
-            for i in 1:nflux
-                print("    Flux #$i: ")
-                locread = readline()
-                x,y = map(x->parse(Float64, x), split(locread))
-                push!(loc, x + y*im)
-            end
-
-        elseif choice == 2
-            println("Insert fluxes at positions θ = pπ, ϕ = qπ. Input p q:")
-            for i in 1:nflux
-                print("    Flux #$i: ")
-                locread = readline()
-                θ,ϕ = map(x->parse(Float64, x), split(locread))
-                
-                u = cos(π*(1-θ)/2) * exp(π*im*ϕ/2)     # In the formula θ is taken from the South pole. π-θ to flip the pole.
-                v = sin(π*(1-θ)/2) * exp(-π*im*ϕ/2)
-                
-                push!(loc, 2*u/v)
+    outputname = "$(fname)_add_$(nflux)_flux"
+    if isdir(outputname)
+        if length(readdir(outputname)) > 0
+            if !overwrite
+                println("Non-empty output directory '$(outputname)' exists.")
+                println("Remove the directory, first, or run the program with flag '--overwrite' to overwrite directory.")
+                return
+            else
+                rm(outputname,recursive=true)
+                mkdir(outputname)
             end
         end
-
-        @time FQH_quasihole_poly_gen!(state,loc)
-        collapse!(state)
-
-        println((length(state.basis), length(state.coef)))
-
-        if choice == 1
-            disk_normalize!(state)
-            printwf(state;fname="$(fname)_flux_dsk")
-        elseif choice==2
-            sphere_normalize!(state)
-            printwf(state;fname="$(fname)_flux_sph")
-        end
+    else
+        mkdir(outputname)
     end
+
+
+    ground_state = readwf(fname)
+    Ne = count(ground_state.basis[1])
+    println("$Ne electrons.")
+
+    guess_num_state = binomial(Ne + nflux,Ne)
+    guess_num_state += guess_num_state < 5 ? guess_num_state : 5 # Add an overcounting
+
+
+    vortex_states = FQH_state_mutable[]
+    for i in 1:guess_num_state
+        print("\rGenerating state $i out of $guess_num_state      ")
+        #state = FQH_state_mutable(copy(ground_state.basis),copy(ground_state.coef)) # create a mutable copy of the ground state
+        state = readwf(fname;mutable=true)
+        loc = rand(ComplexF64,nflux) # nflux random complex numbers
+        FQH_quasihole_poly_gen!(state,loc;quiet=true)
+        collapse!(state)
+        if geom == "disk"
+            disk_normalize!(state)
+        elseif geom == "sphere"
+            sphere_normalize!(state)
+        end
+        push!(vortex_states,state)
+
+        if saveraw
+            printwf(state;fname="$outputname/raw_$(i-1)")
+        end
+        state = nothing
+        GC.gc()
+    end
+    println("Done")
+
+    # Collate and orthonormalize
+    all_basis, all_coef = collate_many_vectors(vortex_states; separate_out=true, collumn_vector=true)
+
+    #println("Orthonormalizing basis using QR decomposition")
+    #@time all_coef_ortho = transpose(Matrix(qr(all_coef).Q))
+
+    println("Orthonormalizing basis using overlap matrix")
+    ov_matrix = transpose(conj.(all_coef)) * all_coef
+    println(size(ov_matrix))
+
+    E = eigvals(Hermitian(ov_matrix))
+    v = eigvecs(Hermitian(ov_matrix))
+
+    all_coef_ortho = [v[:,i] for i in 1:length(E) if E[i] > tol]
+    d   = length(all_coef_ortho)
+
+    println("$d orthonormal states")
+
+
+    for i in 1:d
+        print("\rSaving state $i out of $d      ")
+        coef = all_coef * all_coef_ortho[i] 
+        s = wfnormalize(FQH_state(all_basis,coef))
+        println("Check norm = $(wfnorm(s))")
+        printwf(s;fname="$(outputname)/vec_$(i-1)")
+    end
+    println("Done!")
+
+
+   
 end
 
-main()
+@time main()
