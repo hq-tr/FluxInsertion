@@ -60,7 +60,20 @@ end
 
 function main()
 
-    #println(" ========================== START ============================")
+    @inlinearguments begin
+        @argumentrequired String fname "-f" "--filename"
+        @argumentrequired String geom "-g" "--geometry"
+    end
+
+    if !isfile(fname)
+        println("File '$(fname)' not found. Terminated")
+        return
+    end
+
+    geom = lowercase(geom)
+    @assert(geom in ["sphere","disk"], "'geometry' argument must be either 'sphere' or 'disk'.")
+
+    
 
     print("Working on the disk(1) or sphere(2)? ")
     choice = parse(Int, readline())
