@@ -5,10 +5,11 @@ using .MiscRoutine
 
 using Combinatorics
 using LinearAlgebra
+using Dates
 
 using ArgMacros
 
-const tol = 1e-14
+#const tol = 1e-14
 function raised(partition::BitVector, index_set::Vector{Int}, No::Int)
     compare = BitVector(dex2bin(index_set, No)) .⊻ BitVector(dex2bin(index_set.+1, No))
     return partition .⊻ compare
@@ -21,13 +22,30 @@ function all_valid_raise(partition::BitVector, k::Int, Ne::Int, No::Int)
     return all_results[count.(all_results).==Ne]
 end
 
+function cartesian_to_polar(x::Float64,y::Float64,z::Float64)
+    # This funciton converts cartesian coordinates to the polar angles (ignore radius r)
+    r = √(x^2 + y^2 + z^2)
+    θ = acos(z/r)
+    ϕ = sign(y) * acos(x/√(x^2+y^2))
+    return θ,ϕ
+end
+
+function cartesian_to_polar(x::Vector{T} where T<:Real,y::Vector{T} where T<:Real,z::Vector{T} where T<:Real)
+    # This funciton converts cartesian coordinates to the polar angles (ignore radius r)
+    # This is the vectorized version
+    r = sqrt.(x.^2 + y.^2 + z.^2)
+    θ = acos.(z./r)
+    ϕ = sign.(y) .* acos.(x./sqrt.(x.^2+y.^2))
+    return θ,ϕ
+end
+
 function FQH_quasihole_poly_gen!(start_state::FQH_state_mutable, pos::Vector{T} where T <: Number;quiet=false)
     q = length(pos)
     @assert q≥0
     if length(pos)==0
         return
     else
-        FQH_quasihole_poly_gen!(start_state,pos[1:end-1])
+        FQH_quasihole_poly_gen!(start_state,pos[1:end-1];quiet=quiet)
         w = pos[end]
         if !quiet
             println("Inserting flux at $w")
@@ -57,6 +75,7 @@ function FQH_quasihole_poly_gen!(start_state::FQH_state_mutable, pos::Vector{T} 
             deleteat!(start_state.coef,1:dim)
 
         end
+        collapse!(start_state)
         end # end of @time
         return
     end
@@ -68,14 +87,19 @@ function main()
         @argumentrequired String fname "-f" "--filename"
         @argumentrequired String geom "-g" "--geometry"
         @argumentrequired Int nflux "-n" "--num-flux"
+        @argumentrequired Int guess_num_state "-N" "--num_state"
         @argumentflag overwrite "--overwrite"
         @argumentflag saveraw "--save-raw"
+        @argumentflag showinfo "--show-info"
+        @argumentdefault Float64 1e-14 tol  "--tolerance"
     end
 
     if !isfile(fname)
         println("File '$(fname)' not found. Terminated")
         return
     end
+
+    @assert(tol > 0, "Tolerance must be positive.")
 
     geom = lowercase(geom)
     @assert(geom in ["sphere","disk"], "'geometry' argument must be either 'sphere' or 'disk'.")
@@ -96,32 +120,51 @@ function main()
         mkdir(outputname)
     end
 
+    rawoutputname = "$(fname)_add_$(nflux)_flux_raw"
+    if !isdir(rawoutputname) && saveraw
+        mkdir(rawoutputname)
+    end
+
 
     ground_state = readwf(fname)
     Ne = count(ground_state.basis[1])
     println("$Ne electrons.")
 
-    guess_num_state = binomial(Ne + nflux,Ne)
-    guess_num_state += guess_num_state < 5 ? guess_num_state : 5 # Add an overcounting
+    #guess_num_state = binomial(Ne + nflux,Ne)
+    #guess_num_state += guess_num_state < 20 ? guess_num_state : 20 # Add an overcounting
 
 
-    vortex_states = FQH_state_mutable[]
-    for i in 1:guess_num_state
+    vortex_states = [FQH_state_mutable() for _ in 1:guess_num_state]
+    Threads.@threads for i in 1:guess_num_state
         print("\rGenerating state $i out of $guess_num_state      ")
         #state = FQH_state_mutable(copy(ground_state.basis),copy(ground_state.coef)) # create a mutable copy of the ground state
         state = readwf(fname;mutable=true)
-        loc = rand(ComplexF64,nflux) # nflux random complex numbers
+
+        # Generating nflux random co-ordinates.
+        if geom == "sphere"
+            # This ensure the generated points are uniformly distributed on the sphere
+            x = rand(Float64,nflux)
+            y = rand(Float64,nflux)
+            z = rand(Float64,nflux)
+            θ,ϕ = cartesian_to_polar(x,y,z)
+            u = cos.(π*(1 .- θ) ./2) .* exp.(π*im* ϕ ./ 2)     # In the formula θ is taken from the South pole. π-θ to flip the pole.
+            v = sin.(π*(1 .- θ) ./2) .* exp.(-π*im*ϕ ./ 2)
+            loc = 2*u ./ v
+        elseif geom == "disk"
+            loc = rand(ComplexF64,nflux)
+        end
+        
         FQH_quasihole_poly_gen!(state,loc;quiet=true)
-        collapse!(state)
+        
         if geom == "disk"
             disk_normalize!(state)
         elseif geom == "sphere"
             sphere_normalize!(state)
         end
-        push!(vortex_states,state)
+        vortex_states[i] = state
 
         if saveraw
-            printwf(state;fname="$outputname/raw_$(i-1)")
+            printwf(state;fname="$rawoutputname/raw_$(i-1)")
         end
         state = nothing
         GC.gc()
@@ -141,8 +184,26 @@ function main()
     E = eigvals(Hermitian(ov_matrix))
     v = eigvecs(Hermitian(ov_matrix))
 
+
     all_coef_ortho = [v[:,i] for i in 1:length(E) if E[i] > tol]
     d   = length(all_coef_ortho)
+
+    if showinfo
+        open("info.log","a+") do f
+            write(f,"\n================================\n")
+            write(f,"Current time and date: $(now())\n")
+            write(f,"Input file: $(fname)\n")
+            write(f,"Working on geometry: $(geom)\n")
+            write(f,"Adding $(nflux) flux(es).\n")
+            write(f,"Creating $(guess_num_state) initial state(s).\n")
+            write(f,"Eigenvalues = \n")
+            for ei in E
+                write(f,"$(ei)\n")
+            end
+            write(f,"$d state(s) obtained above tolerance $(tol).\n")
+        end
+        println("Saved log.")
+    end
 
     println("$d orthonormal states")
 
