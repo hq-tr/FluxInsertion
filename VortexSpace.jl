@@ -91,7 +91,7 @@ function main()
         @argumentflag overwrite "--overwrite"
         @argumentflag saveraw "--save-raw"
         @argumentflag showinfo "--show-info"
-        @argumentdefault Float64 1e-14 tol  "--tolerance"
+        @argumentdefault Float64 1e-12 tol  "--tolerance"
     end
 
     if !isfile(fname)
