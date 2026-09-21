@@ -87,11 +87,12 @@ function main()
         @argumentrequired String fname "-f" "--filename"
         @argumentrequired String geom "-g" "--geometry"
         @argumentrequired Int nflux "-n" "--num-flux"
-        @argumentrequired Int guess_num_state "-N" "--num_state"
+        @argumentrequired Int guess_num_state "-N" "--num-state"
         @argumentflag overwrite "--overwrite"
         @argumentflag saveraw "--save-raw"
         @argumentflag showinfo "--show-info"
         @argumentdefault Float64 1e-12 tol  "--tolerance"
+        @argumentoptional String dirread "--import-dir"
     end
 
     if !isfile(fname)
@@ -104,21 +105,6 @@ function main()
     geom = lowercase(geom)
     @assert(geom in ["sphere","disk"], "'geometry' argument must be either 'sphere' or 'disk'.")
 
-    outputname = "$(fname)_add_$(nflux)_flux"
-    if isdir(outputname)
-        if length(readdir(outputname)) > 0
-            if !overwrite
-                println("Non-empty output directory '$(outputname)' exists.")
-                println("Remove the directory, first, or run the program with flag '--overwrite' to overwrite directory.")
-                return
-            else
-                rm(outputname,recursive=true)
-                mkdir(outputname)
-            end
-        end
-    else
-        mkdir(outputname)
-    end
 
     rawoutputname = "$(fname)_add_$(nflux)_flux_raw"
     if !isdir(rawoutputname) && saveraw
@@ -135,7 +121,38 @@ function main()
 
 
     vortex_states = [FQH_state_mutable() for _ in 1:guess_num_state]
-    Threads.@threads for i in 1:guess_num_state
+    n_imported = 0
+    if dirread != nothing
+        i=1
+        for vecname in readdir(dirread)
+            println("Reading $(vecname)")
+            readstate = readwf("$(dirread)/$(vecname)";mutable=true)
+            if dim(readstate) > 0 && count_e(readstate) == Ne
+                vortex_states[i] = readstate
+                i+=1
+            end
+        end
+        println("Imported $(i-1) state(s)")
+        n_imported = i-1
+    end
+
+    outputname = "$(fname)_add_$(nflux)_flux"
+    if isdir(outputname)
+        if length(readdir(outputname)) > 0
+            if !overwrite
+                println("Non-empty output directory '$(outputname)' exists.")
+                println("Remove the directory, first, or run the program with flag '--overwrite' to overwrite directory.")
+                return
+            else
+                mv(outputname,"$(outputname).bak$(Dates.now())")
+                mkdir(outputname)
+            end
+        end
+    else
+        mkdir(outputname)
+    end
+
+    Threads.@threads for i in (n_imported+1):guess_num_state
         print("\rGenerating state $i out of $guess_num_state      ")
         #state = FQH_state_mutable(copy(ground_state.basis),copy(ground_state.coef)) # create a mutable copy of the ground state
         state = readwf(fname;mutable=true)
